@@ -9,7 +9,6 @@ import type { RootStackParamList } from "../types";
 
 
 const pb = new Pocketbase("https://0ba2-165-124-85-89.ngrok-free.app/");
-const clientId = "e45f6cf799b54d0e95259e70fa6eb031";
 const prefix = Linking.createURL("/");
 
 export default function Home({ navigation }: NativeStackScreenProps<RootStackParamList, 'Home'>) {
