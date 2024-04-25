@@ -21,9 +21,10 @@ export default function Home({ navigation }: NativeStackScreenProps<RootStackPar
     authorizationEndpoint: "https://accounts.spotify.com/authorize",
   };
 
+
   const [request, response, promptAsync] = AuthSession.useAuthRequest(
     {
-      clientId: clientId,
+      clientId: process.env.CLIENT_ID,
       scopes: [
         "user-read-private",
         "user-read-email",
@@ -58,7 +59,7 @@ export default function Home({ navigation }: NativeStackScreenProps<RootStackPar
     });
 
     const body = JSON.stringify({
-      client_id: clientId,
+      client_id: process.env.CLIENT_ID,
       grant_type: "authorization_code",
       code,
       // code_verifier: codeVerifier,

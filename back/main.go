@@ -285,18 +285,11 @@ func main() {
 			Method: http.MethodGet,
 			Path:   "/rooms/:id",
 			Handler: func(c echo.Context) error {
-
 				roomId := c.PathParam("id")
-				roomRecord, err := app.Dao().FindRecordById("rooms", roomId)
-				if err != nil {
-					log.Println(err)
-					return c.String(404, errorResponse(err))
+				roomOwner, err := getRoomOwner(app, roomId)
+				if err != nil || roomOwner == nil {
+					return c.String(404, "")
 				}
-				if errs := app.Dao().ExpandRecord(roomRecord, []string{"owner"}, nil); len(errs) > 0 {
-					log.Printf("failed to expand: %v\n", errs)
-					return c.String(400, errorResponse(err))
-				}
-				roomOwner := roomRecord.ExpandedOne("owner")
 				return c.JSON(200, map[string]string{
 					"owner": roomOwner.GetString("username"),
 				})
@@ -327,6 +320,7 @@ func main() {
 				url := "https://api.spotify.com/v1/me/player/queue?uri=" + requestBody.SpotifyUri
 
 				decoded, err := makeSpotifyRequest(app, "POST", url, tokens)
+				fmt.Println(decoded)
 
 				errorReceived, ok := (*decoded)["error"]
 				if err != nil || (ok && errorReceived.(map[string]interface{})["status"].(float64) == 404) {
