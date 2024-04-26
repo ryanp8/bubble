@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bytes"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
+
+	bubble "bubble/internal"
 
 	"github.com/labstack/echo/v5"
 	"github.com/pocketbase/pocketbase"
@@ -16,154 +14,6 @@ import (
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/models"
 )
-
-var CLIENT_ID = os.Getenv("CLIENT_ID")
-var CLIENT_SECRET = os.Getenv("CLIENT_SECRET")
-var httpClient = &http.Client{}
-
-type AuthRequestBody struct {
-	ClientId    string `json:"client_id"`
-	GrantType   string `json:"grant_type"`
-	Code        string `json:"code"`
-	State       string `json:"state"`
-	RedirectUri string `json:"redirect_uri"`
-}
-
-type Tokens struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-}
-
-type User struct {
-	Id           string `db:"id" json:"id"`
-	Username     string `db:"username" json:"username"`
-	Email        string `db:"email" json:"email"`
-	AccessToken  string `db:"accessToken" json:"access_token"`
-	RefreshToken string `db:"refreshToken" json:"refresh_token"`
-	Room         string `db:"room" json:"room"`
-}
-
-type Room struct {
-	Id    string   `db:"id" json:"id"`
-	Users []string `db:"users" json:"users"`
-	Owner string   `db:"owner" json:"owner"`
-}
-
-func errorResponse(err error) string {
-	encoded, _ := json.Marshal(map[string]string{
-		"error": err.Error(),
-	})
-	return string(encoded[:])
-}
-
-func getTokens(client *http.Client, body *AuthRequestBody) (*Tokens, error) {
-	// postBody := []byte("client_id=" + CLIENT_ID + "&grant_type=authorization_code&code=" + body.Code + "&redirect_uri=" + body.RedirectUri + "&code_verifier=" + body.CodeVerifier)
-	postBody := []byte("code=" + body.Code + "&redirect_uri=" + body.RedirectUri + "&grant_type=authorization_code")
-
-	req, err := http.NewRequest("POST", "https://accounts.spotify.com/api/token", bytes.NewBuffer(postBody))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Add("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(CLIENT_ID+":"+CLIENT_SECRET)))
-	res, err := client.Do(req)
-	if err != nil {
-		log.Println(err)
-		return nil, err
-	}
-	defer res.Body.Close()
-
-	tokenResponse := new(Tokens)
-	json.NewDecoder(res.Body).Decode(&tokenResponse)
-	return tokenResponse, nil
-}
-
-func makeSpotifyRequest(app *pocketbase.PocketBase, method, url string, tokens *Tokens) (*map[string]interface{}, error) {
-	req, err := http.NewRequest(method, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Add("Authorization", "Bearer "+tokens.AccessToken)
-	res, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	if res.StatusCode == 401 || res.StatusCode == 400 {
-		tokenResponse, err := refreshToken(app, tokens)
-		if err != nil {
-			return nil, err
-		}
-		return makeSpotifyRequest(app, method, url, tokenResponse)
-	}
-	decoded := make(map[string]interface{})
-	json.NewDecoder(res.Body).Decode(&decoded)
-	return &decoded, nil
-}
-
-func getRoomOwner(app *pocketbase.PocketBase, roomId string) (*models.Record, error) {
-	roomRecord, err := app.Dao().FindRecordById("rooms", roomId)
-	if err != nil {
-		log.Println(err)
-		return nil, err
-	}
-
-	if errs := app.Dao().ExpandRecord(roomRecord, []string{"owner"}, nil); len(errs) > 0 {
-		log.Printf("failed to expand: %v\n", errs)
-		return nil, err
-	}
-	roomOwner := roomRecord.ExpandedOne("owner")
-	return roomOwner, nil
-}
-
-func getRoomOwnerTokens(app *pocketbase.PocketBase, roomId string) (*Tokens, error) {
-	roomOwner, err := getRoomOwner(app, roomId)
-	if err != nil {
-		return nil, err
-	}
-	acccesToken := roomOwner.GetString("accessToken")
-	refreshToken := roomOwner.GetString("refreshToken")
-	tokens := &Tokens{
-		AccessToken:  acccesToken,
-		RefreshToken: refreshToken,
-	}
-	return tokens, nil
-}
-
-func refreshToken(app *pocketbase.PocketBase, currentTokens *Tokens) (*Tokens, error) {
-	// Match the access token to a user
-	client := &http.Client{}
-	userRecord, err := app.Dao().FindFirstRecordByData("users", "accessToken", currentTokens.AccessToken)
-	if err != nil {
-		return nil, err
-	}
-	refreshTokenBody := []byte("grant_type=refresh_token&refresh_token=" + currentTokens.RefreshToken + "&client_id=" + CLIENT_ID)
-	refreshTokenReq, err := http.NewRequest("POST", "https://accounts.spotify.com/api/token", bytes.NewBuffer(refreshTokenBody))
-	refreshTokenReq.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	refreshTokenReq.Header.Add("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(CLIENT_ID+":"+CLIENT_SECRET)))
-	if err != nil {
-		return nil, err
-	}
-	res, err := client.Do(refreshTokenReq)
-	if err != nil {
-		log.Println(err)
-		return nil, err
-	}
-	defer res.Body.Close()
-	fmt.Printf("refresh token status: %v\n", res.StatusCode)
-	decoded := make(map[string]interface{})
-	json.NewDecoder(res.Body).Decode(&decoded)
-
-	newAccessToken := decoded["access_token"].(string)
-	userRecord.Set("accessToken", newAccessToken)
-	if err := app.Dao().SaveRecord(userRecord); err != nil {
-		return nil, err
-	}
-	return &Tokens{
-		AccessToken:  newAccessToken,
-		RefreshToken: currentTokens.RefreshToken,
-	}, nil
-}
 
 func main() {
 	app := pocketbase.New()
@@ -185,24 +35,24 @@ func main() {
 			Method: http.MethodPost,
 			Path:   "/api/login",
 			Handler: func(c echo.Context) error {
-				body := new(AuthRequestBody)
+				body := new(bubble.AuthRequestBody)
 				if err := c.Bind(body); err != nil {
 					log.Println(err)
-					return c.String(400, errorResponse(err))
+					return c.String(400, bubble.ErrorResponse(err))
 				}
 
 				// Get access token from spotify using PKCE
-				tokenResponse, err := getTokens(httpClient, body)
+				tokenResponse, err := bubble.GetTokens(httpClient, body)
 				if err != nil {
 					log.Println(err)
-					return c.String(400, errorResponse(err))
+					return c.String(400, bubble.ErrorResponse(err))
 				}
 
 				// Use access token to get user info
-				userInfo, err := makeSpotifyRequest(app, "GET", "https://api.spotify.com/v1/me", tokenResponse)
+				userInfo, err := bubble.MakeSpotifyRequest(app, "GET", "https://api.spotify.com/v1/me", tokenResponse)
 				if err != nil {
 					log.Println(err)
-					return c.String(400, errorResponse(err))
+					return c.String(400, bubble.ErrorResponse(err))
 				}
 
 				userId := (*userInfo)["id"].(string)
@@ -216,7 +66,7 @@ func main() {
 					userCollection, err := app.Dao().FindCollectionByNameOrId("users")
 					if err != nil {
 						log.Println(err)
-						return c.String(400, errorResponse(err))
+						return c.String(400, bubble.ErrorResponse(err))
 					}
 					userRecord = models.NewRecord(userCollection)
 					userRecord.Set("id", userId)
@@ -229,7 +79,7 @@ func main() {
 
 				if err := app.Dao().SaveRecord(userRecord); err != nil {
 					log.Println(err)
-					return c.String(400, errorResponse(err))
+					return c.String(400, bubble.ErrorResponse(err))
 				}
 				response := &map[string]string{
 					"userId":       userId,
@@ -255,7 +105,7 @@ func main() {
 				})
 				if err := c.Bind(body); err != nil {
 					log.Println(err)
-					return c.String(400, errorResponse(err))
+					return c.String(400, bubble.ErrorResponse(err))
 				}
 
 				_, err := app.Dao().FindRecordById("rooms", roomId)
@@ -281,12 +131,14 @@ func main() {
 			},
 		})
 
+		// Verifies that the room exists by send 200 OK and the room owner
+		// If the room doesn't exist, let the client know by sending 404 response
 		e.Router.AddRoute(echo.Route{
 			Method: http.MethodGet,
 			Path:   "/rooms/:id",
 			Handler: func(c echo.Context) error {
 				roomId := c.PathParam("id")
-				roomOwner, err := getRoomOwner(app, roomId)
+				roomOwner, err := bubble.GetRoomOwner(app, roomId)
 				if err != nil || roomOwner == nil {
 					return c.String(404, "")
 				}
@@ -309,17 +161,17 @@ func main() {
 
 				if err := c.Bind(requestBody); err != nil {
 					log.Println(err.Error())
-					return c.String(400, errorResponse(err))
+					return c.String(400, bubble.ErrorResponse(err))
 				}
 
-				tokens, err := getRoomOwnerTokens(app, roomId)
+				tokens, err := bubble.GetRoomOwnerTokens(app, roomId)
 				if err != nil {
-					return c.JSON(404, errorResponse(err))
+					return c.JSON(404, bubble.ErrorResponse(err))
 				}
 
 				url := "https://api.spotify.com/v1/me/player/queue?uri=" + requestBody.SpotifyUri
 
-				decoded, err := makeSpotifyRequest(app, "POST", url, tokens)
+				decoded, err := bubble.MakeSpotifyRequest(app, "POST", url, tokens)
 				fmt.Println(decoded)
 
 				errorReceived, ok := (*decoded)["error"]
@@ -339,14 +191,14 @@ func main() {
 			Handler: func(c echo.Context) error {
 				roomId := c.PathParam("roomId")
 				track := c.QueryParam("track")
-				tokens, err := getRoomOwnerTokens(app, roomId)
+				tokens, err := bubble.GetRoomOwnerTokens(app, roomId)
 				if err != nil {
-					return c.JSON(404, errorResponse(err))
+					return c.JSON(404, bubble.ErrorResponse(err))
 				}
 
 				url := "https://api.spotify.com/v1/search?q=" + strings.Replace(track, " ", "+", -1) + "&type=track"
 
-				decoded, err := makeSpotifyRequest(app, "GET", url, tokens)
+				decoded, err := bubble.MakeSpotifyRequest(app, "GET", url, tokens)
 				if err != nil || ((*decoded)["status"] != nil && (*decoded)["status"] != 200) {
 					return c.JSON(404, map[string]string{
 						"message": "error occured",
@@ -365,11 +217,11 @@ func main() {
 				fmt.Println("CLOSING ROOM")
 				roomRecord, err := app.Dao().FindRecordById("rooms", roomId)
 				if err != nil {
-					return c.JSON(400, errorResponse(err))
+					return c.JSON(400, bubble.ErrorResponse(err))
 				}
 
 				if err := app.Dao().DeleteRecord(roomRecord); err != nil {
-					return c.JSON(400, errorResponse(err))
+					return c.JSON(400, bubble.ErrorResponse(err))
 				}
 				return c.JSON(200, map[string]string{
 					"message": "removed room",
@@ -383,10 +235,10 @@ func main() {
 			Path:   "/rooms/:roomId/top",
 			Handler: func(c echo.Context) error {
 				roomId := c.PathParam("roomId")
-				tokens, _ := getRoomOwnerTokens(app, roomId)
+				tokens, _ := bubble.GetRoomOwnerTokens(app, roomId)
 
 				url := "https://api.spotify.com/v1/me/top/tracks?time_range=short_term"
-				response, err := makeSpotifyRequest(app, "GET", url, tokens)
+				response, err := bubble.MakeSpotifyRequest(app, "GET", url, tokens)
 				if err != nil {
 					return c.String(400, "error")
 				}
